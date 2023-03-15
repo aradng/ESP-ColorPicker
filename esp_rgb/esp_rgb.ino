@@ -1,42 +1,41 @@
-/*********
-  Rui Santos
-  Complete project details at https://randomnerdtutorials.com  
-*********/
-
-// Load Wi-Fi library
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>         // https://github.com/tzapu/WiFiManager
 #include <ESP8266mDNS.h>
+#include <StreamString.h>
+#include <ArduinoOTA.h>
+#include <WebSerial.h>
+#include "cie1931.h"
+
+
+#ifdef DEBUG_ESP_PORT
+#define DEBUG_MSG(...) DEBUG_ESP_PORT.printf( __VA_ARGS__ )
+#else
+#define DEBUG_MSG(...)
+#endif
+
+void update_started();
+void update_progress(int progress, int total);
+void update_finished();
+void rgb(int r, int g, int b, const uint32_t table[]);
+void handle_fade_rgb();
+void handle_set_rgb();
 
 // Set web server port number to 80
-WiFiServer server(80);
-
-// Decode HTTP GET value
-String redString = "0";
-String greenString = "0";
-String blueString = "0";
-int pos1 = 0;
-int pos2 = 0;
-int pos3 = 0;
-int pos4 = 0;
-
-// Variable to store the HTTP req  uest
-String header;
+ESP8266WebServer server(80);
+int last_progress = 0;
 
 // Red, green, and blue pins for PWM control
 const int redPin = 2;    // 13 corresponds to GPIO13
 const int greenPin = 0;  // 12 corresponds to GPIO12
 const int bluePin = 3;   // 14 corresponds to GPIO14
 
-// Current time
-unsigned long currentTime = millis();
-// Previous time
-unsigned long previousTime = 0;
-// Define timeout time in milliseconds (example: 2000ms = 2s)
-const long timeoutTime = 2000;
-
 void setup() {
-  pinMode(BUILTIN_LED, OUTPUT)                            ;
+
+  ArduinoOTA.onStart(update_started);
+  ArduinoOTA.onProgress(update_progress);
+  ArduinoOTA.onEnd(update_finished);
+
+  pinMode(BUILTIN_LED, OUTPUT);
   pinMode(redPin, OUTPUT);
   pinMode(greenPin, OUTPUT);
   pinMode(bluePin, OUTPUT);
@@ -46,99 +45,116 @@ void setup() {
   for(int i = 0; i < 10; i++)
   {
     digitalWrite(BUILTIN_LED, !digitalRead(BUILTIN_LED));
-    delay(300);
+    delay(30);
   }
   Serial.begin(115200);
   // Connect to Wi-Fi network with SSID and password
-  Serial.print("Connecting to ");
+  WiFi.hostname("ESP Color Picker");
   WiFiManager wifiManager;
   wifiManager.autoConnect("AutoConnectAP");
-  // Print local IP address and start web server
-  Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  DEBUG_MSG("----------Connected----------\n");
+  ArduinoOTA.setHostname("ESP Color Picker");
+  ArduinoOTA.begin();
+  DEBUG_MSG("%s\n", WiFi.localIP().toString().c_str());
   server.begin();
 
   MDNS.begin("ESP-ColorPicker");
-  Serial.println("mDNS responder started");
   MDNS.addService("http", "tcp", 80);
 
-  analogWriteRange(1023)
+  analogWriteFreq(1000);
+  analogWriteRange(1023);
+  server.on("/rgb", handle_set_rgb);
+  server.on("/fade", handle_fade_rgb);
 }
 
 void loop() {
+  server.handleClient();
   MDNS.update();
-  WiFiClient client = server.available();  // Listen for incoming clients
+  ArduinoOTA.handle();
+}
 
-  if (client) {  // If a new client connects,
-    currentTime = millis();
-    previousTime = currentTime;
-    // Serial.println("New Client.");                                             // print a message out in the serial port
-    String currentLine = "";                                                   // make a String to hold incoming data from the client
-    while (client.connected() && currentTime - previousTime <= timeoutTime) {  // loop while the client's connected
-      currentTime = millis();
-      if (client.available()) {  // if there's bytes to read from the client,
-        char c = client.read();  // read a byte, then
-        // Serial.write(c);         // print it out the serial monitor
-        header += c;
-        if (c == '\n') {  // if the byte is a newline character
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
-          if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println("Connection: close");
-            client.println();
+void rgb(int r, int g, int b, const uint32_t table[]){
+  analogWrite(redPin, 0x3FF - table[r]);
+  analogWrite(greenPin, 0x3FF - table[g]);
+  analogWrite(bluePin, 0x3fF - table[b]);
+  // DEBUG_MSG("[%d, %d, %d], [%d, %d, %d] \n", r, g, b, table[r], table[g], table[b]);
+}
 
-            // Display the HTML web page
-            client.println("<!DOCTYPE html><html>");
-            client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-            client.println("<link rel=\"icon\" href=\"data:,\">");
-            client.println("<link rel=\"stylesheet\" href=\"https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css\">");
-            client.println("<script src=\"https://cdnjs.cloudflare.com/ajax/libs/jscolor/2.0.4/jscolor.min.js\"></script>");
-            client.println("</head><body><div class=\"container\"><div class=\"row\"><h1>ESP Color Picker</h1></div>");
-            client.println("<a class=\"btn btn-primary btn-lg\" href=\"#\" id=\"change_color\" role=\"button\">Change Color</a> ");
-            client.println("<input class=\"jscolor {onFineChange:'update(this)'}\" id=\"rgb\"></div>");
-            client.println("<script>function update(picker) {document.getElementById('rgb').innerHTML = Math.round(picker.rgb[0]) + ', ' +  Math.round(picker.rgb[1]) + ', ' + Math.round(picker.rgb[2]);");
-            client.println("document.getElementById(\"change_color\").href=\"?r\" + Math.round(picker.rgb[0]) + \"g\" +  Math.round(picker.rgb[1]) + \"b\" + Math.round(picker.rgb[2]) + \"&\";}</script></body></html>");
-            // The HTTP response ends with another blank line
-            client.println();
+void handle_set_rgb(){
+  StreamString temp;
+  temp.reserve(1200);  // Preallocate a large chunk to avoid memory fragmentation
+  temp.printf("\
+  <!DOCTYPE html><html>\
+    <head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+      <link rel=\"icon\" href=\"data:,\">\
+      <link rel=\"stylesheet\" href=\"https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css\">\
+      <script src=\"https://cdnjs.cloudflare.com/ajax/libs/jscolor/2.0.4/jscolor.min.js\"></script>\
+    </head>\
+    <body>\
+      <div class=\"container\">\
+        <div class=\"row\">\
+          <h1>ESP Color Picker</h1>\
+        </div>\
+        <a class=\"btn btn-primary btn-lg\" href=\"#\" id=\"change_color\" role=\"button\">Change Color</a>\
+        <input class=\"jscolor {onFineChange:'update(this)'}\" id=\"rgb\">\
+      </div>\
+      <script>function update(picker) {document.getElementById('rgb').innerHTML = Math.round(picker.rgb[0]) + ', ' +  Math.round(picker.rgb[1]) + ', ' + Math.round(picker.rgb[2]);\
+      document.getElementById(\"change_color\").href=\"?r=\" + Math.round(picker.rgb[0]) + \"&g=\" +  Math.round(picker.rgb[1]) + \"&b=\" + Math.round(picker.rgb[2]);}\
+      </script>\
+    </body>\
+  </html>");
+  int r = server.arg("r").toInt();
+  int g = server.arg("g").toInt();
+  int b = server.arg("g").toInt();
+  rgb(r, g, b, cie);
+  server.send(200, "text/html", temp.c_str());
+  DEBUG_MSG("[%d, %d, %d] \n", r, g ,b);
+}
 
-            // Request sample: /?r201g32b255&
-            // Red = 201 | Green = 32 | Blue = 255
-            if (header.indexOf("GET /?r") >= 0) {
-              pos1 = header.indexOf('r');
-              pos2 = header.indexOf('g');
-              pos3 = header.indexOf('b');
-              pos4 = header.indexOf('&');
-              redString = header.substring(pos1 + 1, pos2);
-              greenString = header.substring(pos2 + 1, pos3);
-              blueString = header.substring(pos3 + 1, pos4);
-              // Serial.println(redString.toInt());
-              // Serial.println(greenString.toInt());
-              // Serial.println(blueString.toInt());
-              analogWrite(redPin, 0xFF - redString.toInt());
-              analogWrite(greenPin, 0xFF - greenString.toInt());
-              analogWrite(bluePin, 0xFF - blueString.toInt());
-            }
-            // Break out of the while loop
-            break;
-          } else {  // if you got a newline, then clear currentLine
-            currentLine = "";
-          }
-        } else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-      }
-    }
-    // Clear the header variable
-    header = "";
-    // Close the connection
-    client.stop();
-    // Serial.println("Client disconnected.");
-    // Serial.println("");
+void handle_fade_rgb(){
+  const int steps = 100;
+  int rs = server.arg("rs").toInt();
+  int re = server.arg("re").toInt();
+  int gs = server.arg("gs").toInt();
+  int ge = server.arg("ge").toInt();
+  int bs = server.arg("bs").toInt();
+  int be = server.arg("be").toInt();
+  int t = server.arg("t").toInt();
+  DEBUG_MSG("[%d, %d, %d] to [%d, %d, %d] - %d ms\n", rs, gs, bs, re, ge, be, t);
+  t = t*1000;
+  if (t < 0)
+    t = 0;
+  uint64_t micros = micros64();
+  for(int i = 0; i < steps; i++){
+    uint64_t t_i = map(i, 0, steps - 1, t/steps , t);
+    int r = map(i, 0, steps - 1, rs, re);
+    int g = map(i, 0, steps - 1, gs, ge);
+    int b = map(i, 0, steps - 1, bs, be);
+    rgb(r,g,b, cie_100);
+    uint64_t t_d = max(uint64_t (0), uint64_t(t_i - (micros64() - micros)));
+    if (t_i > (micros64() - micros))
+      delayMicroseconds(t_d);
+    else
+      t_d = 0;
+    // DEBUG_MSG("%llu, %llu, %llu \n", t_i/1000, t_d/1000, (micros64() - micros)/1000);
   }
+  
+  server.send(200, "text/html", "");
+}
+
+void update_started() {
+  DEBUG_MSG("----------OTA Update----------\n");
+  DEBUG_MSG("Progress :\t0%%");
+}
+
+void update_progress(int progress, int total) {
+  if (int(progress / (total / 100)) >= last_progress + 10)
+  {
+    last_progress += 10;
+    DEBUG_MSG("\t%d%%", last_progress);
+  }
+}
+
+void update_finished() {
+  DEBUG_MSG("\n----------UPDATED----------\n");
 }
